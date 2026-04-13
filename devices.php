@@ -10,7 +10,8 @@ $statusFilter = $_GET['status'] ?? '';
 $where = '1=1';
 $params = [];
 if ($search) {
-    $where .= " AND (device_name LIKE ? OR mac_address LIKE ? OR location LIKE ?)";
+    $where .= " AND (device_name LIKE ? OR mac_address LIKE ? OR location LIKE ? OR access_group LIKE ?)";
+    $params[] = "%$search%";
     $params[] = "%$search%";
     $params[] = "%$search%";
     $params[] = "%$search%";
@@ -45,6 +46,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_device'])) {
     $deviceName = trim($_POST['device_name'] ?? '');
     $macAddress = trim($_POST['mac_address'] ?? '');
     $location = trim($_POST['location'] ?? '');
+    $accessGroup = trim($_POST['access_group'] ?? '');
     $apiKey = trim($_POST['api_key'] ?? '');
     
     if (empty($deviceName) || empty($macAddress) || empty($apiKey)) {
@@ -52,8 +54,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_device'])) {
     } elseif (!preg_match('/^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/', $macAddress)) {
         $error = 'Format MAC address tidak valid';
     } else {
-        $stmt = $pdo->prepare("INSERT INTO devices (device_name, mac_address, api_key, location) VALUES (?, ?, ?, ?)");
-        $stmt->execute([$deviceName, $macAddress, $apiKey, $location ?: null]);
+        $stmt = $pdo->prepare("INSERT INTO devices (device_name, mac_address, api_key, location, access_group) VALUES (?, ?, ?, ?, ?)");
+        $stmt->execute([$deviceName, $macAddress, $apiKey, $location ?: null, $accessGroup ?: null]);
         $success = 'Device berhasil ditambahkan';
     }
 }
@@ -107,6 +109,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_device'])) {
                 <div class="col-12 col-md-6 col-lg-3">
                     <label for="location" class="form-label fw-medium">Lokasi</label>
                     <input type="text" id="location" name="location" class="form-control" placeholder="Contoh: Gedung A, Lantai 2">
+                </div>
+                <div class="col-12 col-md-6 col-lg-3">
+                    <label for="access_group" class="form-label fw-medium">Grup Akses</label>
+                    <input type="text" id="access_group" name="access_group" class="form-control" placeholder="Contoh: Lab Elektro / Ruang Server">
+                    <div class="form-text">Device dengan grup akses sama akan dianggap satu ruangan/satu sesi akses</div>
                 </div>
                 <div class="col-12 col-md-6 col-lg-3">
                     <label for="api_key" class="form-label fw-medium">API Key</label>
@@ -163,6 +170,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_device'])) {
                     <th>Nama Device</th>
                     <th>MAC Address</th>
                     <th>Lokasi</th>
+                    <th>Grup Akses</th>
                     <th>API Key</th>
                     <th>Status</th>
                     <th>Terakhir Seen</th>
@@ -175,6 +183,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_device'])) {
                     <td class="fw-medium"><?= htmlspecialchars($device['device_name']) ?></td>
                     <td><code class="bg-light px-2 py-1 rounded"><?= htmlspecialchars($device['mac_address']) ?></code></td>
                     <td><?= $device['location'] ? htmlspecialchars($device['location']) : '<span class="text-muted">-</span>' ?></td>
+                    <td><?= $device['access_group'] ? htmlspecialchars($device['access_group']) : '<span class="text-muted">-</span>' ?></td>
                     <td><code class="bg-light px-2 py-1 rounded small"><?= htmlspecialchars($device['api_key']) ?></code></td>
                     <td>
                         <span class="badge badge-status <?= $device['is_active'] ? 'badge-success-custom' : 'badge-danger-custom' ?>">

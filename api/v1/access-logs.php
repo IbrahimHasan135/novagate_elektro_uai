@@ -49,15 +49,15 @@ try {
     $pdo = getDB();
     $pdo->beginTransaction();
 
-    $findExistingSession = function (string $rfidCodeValue, string $macAddressValue, string $logDateValue) use ($pdo) {
+    $findExistingSession = function (string $rfidCodeValue, string $accessGroupValue, string $logDateValue) use ($pdo) {
         $stmt = $pdo->prepare("
             SELECT id, check_in_at, check_out_at
             FROM access_sessions
-            WHERE rfid_code = ? AND mac_address = ? AND log_date = ?
+            WHERE rfid_code = ? AND access_group = ? AND log_date = ?
             ORDER BY id DESC
             LIMIT 1
         ");
-        $stmt->execute([$rfidCodeValue, $macAddressValue, $logDateValue]);
+        $stmt->execute([$rfidCodeValue, $accessGroupValue, $logDateValue]);
         return $stmt->fetch();
     };
 
@@ -65,20 +65,39 @@ try {
     $device = null;
 
     if ($isDebugApiKey) {
-        $device = [
-            'id' => null,
-            'device_name' => 'DEBUG_DEVICE',
-            'is_active' => true
-        ];
+        $stmt = $pdo->prepare("SELECT id, device_name, access_group, is_active FROM devices WHERE mac_address = ?");
+        $stmt->execute([$macAddress]);
+        $device = $stmt->fetch();
+
+        if ($device) {
+            $device['auth_mode'] = 'debug_api_key';
+        } else {
+            $device = [
+                'id' => null,
+                'device_name' => 'DEBUG_DEVICE',
+                'access_group' => 'DEBUG_AREA',
+                'is_active' => true,
+                'auth_mode' => 'debug_api_key'
+            ];
+        }
     } else {
-        $stmt = $pdo->prepare("SELECT id, device_name, is_active FROM devices WHERE mac_address = ? AND api_key = ?");
+        $stmt = $pdo->prepare("SELECT id, device_name, access_group, is_active FROM devices WHERE mac_address = ? AND api_key = ?");
         $stmt->execute([$macAddress, $apiKey]);
         $device = $stmt->fetch();
+
+        if ($device) {
+            $device['auth_mode'] = 'device_api_key';
+        }
     }
 
     $deviceId = $device['id'] ?? null;
     $deviceName = $device['device_name'] ?? null;
+    $accessGroup = $device['access_group'] ?? null;
     $deviceActive = $device['is_active'] ?? false;
+
+    if (!empty($deviceName) && empty($accessGroup)) {
+        $accessGroup = $deviceName;
+    }
 
     $isRegistered = false;
     $accessStatus = 'unknown_device';
@@ -93,6 +112,7 @@ try {
 
     if (!$device) {
         $deviceName = 'UNKNOWN_DEVICE';
+        $accessGroup = null;
     } elseif (!$deviceActive) {
         $accessStatus = 'rejected';
         $responseMessage = 'Device inactive';
@@ -139,12 +159,14 @@ try {
             log_date,
             request_at,
             mac_address,
+            device_name,
+            access_group,
             is_registered,
             access_status,
             status_type,
             raw_payload,
             received_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
     ")->execute([
         $deviceId,
         $rfidId,
@@ -152,14 +174,16 @@ try {
         $logDate,
         $sentAtForDb,
         $macAddress,
+        $deviceName,
+        $accessGroup,
         $isRegistered ? 1 : 0,
         $accessStatus,
         $statusType,
         json_encode($input)
     ]);
 
-    if ($accessStatus === 'accepted') {
-        $existingSession = $findExistingSession($rfidCode, $macAddress, $logDate);
+    if ($accessStatus === 'accepted' && !empty($accessGroup)) {
+        $existingSession = $findExistingSession($rfidCode, $accessGroup, $logDate);
 
         if ($existingSession) {
             $checkInAt = $existingSession['check_in_at'];
@@ -185,6 +209,7 @@ try {
                     check_out_at = ?,
                     last_tap_at = ?,
                     owner_name = ?,
+                    last_device_name = ?,
                     updated_at = NOW()
                 WHERE id = ?
             ")->execute([
@@ -194,6 +219,7 @@ try {
                 $checkOutAt,
                 $sentAtForDb,
                 $ownerName,
+                $deviceName,
                 $existingSession['id']
             ]);
         } else {
@@ -210,8 +236,11 @@ try {
                     check_out_at,
                     last_tap_at,
                     mac_address,
-                    owner_name
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    access_group,
+                    owner_name,
+                    entry_device_name,
+                    last_device_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ")->execute([
                 $deviceId,
                 $rfidId,
@@ -221,12 +250,15 @@ try {
                 $checkOutAt,
                 $sentAtForDb,
                 $macAddress,
-                $ownerName
+                $accessGroup,
+                $ownerName,
+                $deviceName,
+                $deviceName
             ]);
         }
     }
 
-    if (!$isDebugApiKey && !empty($deviceId)) {
+    if (!empty($deviceId)) {
         $pdo->prepare("UPDATE devices SET last_seen_at = NOW() WHERE id = ?")
             ->execute([$deviceId]);
     }
@@ -245,8 +277,9 @@ try {
             'check_out_at' => $checkOutAt,
             'owner_name' => $ownerName,
             'access_note' => $accessNote,
-            'auth_mode' => $isDebugApiKey ? 'debug_api_key' : 'device_api_key',
-            'device_name' => $deviceName
+            'auth_mode' => $device['auth_mode'] ?? ($isDebugApiKey ? 'debug_api_key' : 'device_api_key'),
+            'device_name' => $deviceName,
+            'access_group' => $accessGroup
         ]
     ], $responseCode);
     

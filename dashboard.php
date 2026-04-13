@@ -50,9 +50,8 @@ $totalLogs = $stmt->fetchColumn();
 $limit = 20;
 
 $accessSql = "
-    SELECT asess.*, d.device_name
+    SELECT asess.*
     FROM access_sessions asess
-    LEFT JOIN devices d ON asess.device_id = d.id
     WHERE " . implode(' AND ', $accessWhere) . "
     ORDER BY asess.last_tap_at DESC, asess.updated_at DESC
     LIMIT $limit
@@ -62,9 +61,8 @@ $accessStmt->execute($accessParams);
 $accesses = $accessStmt->fetchAll();
 
 $logsSql = "
-    SELECT al.*, d.device_name, r.owner_name
+    SELECT al.*, r.owner_name
     FROM access_logs al
-    LEFT JOIN devices d ON al.device_id = d.id
     LEFT JOIN rfids r ON al.rfid_id = r.id
     WHERE " . implode(' AND ', $logWhere) . "
     ORDER BY al.request_at DESC, al.received_at DESC
@@ -180,7 +178,9 @@ $logs = $logsStmt->fetchAll();
                     <th>Jam Keluar</th>
                     <th>Kode RFID</th>
                     <th>Pemilik</th>
-                    <th>Device</th>
+                    <th>Device Masuk</th>
+                    <th>Tap Terakhir</th>
+                    <th>Grup Akses</th>
                     <th>MAC Address</th>
                 </tr>
             </thead>
@@ -195,7 +195,9 @@ $logs = $logsStmt->fetchAll();
                     <td><?= $access['check_out_at'] ? date('H:i:s', strtotime($access['check_out_at'])) : '<span class="text-muted">-</span>' ?></td>
                     <td><code class="bg-light px-2 py-1 rounded"><?= htmlspecialchars($access['rfid_code']) ?></code></td>
                     <td><?= $access['owner_name'] ? htmlspecialchars($access['owner_name']) : '<span class="text-muted">-</span>' ?></td>
-                    <td><?= $access['device_name'] ? htmlspecialchars($access['device_name']) : '<span class="text-muted">Unknown</span>' ?></td>
+                    <td><?= $access['entry_device_name'] ? htmlspecialchars($access['entry_device_name']) : '<span class="text-muted">Unknown</span>' ?></td>
+                    <td><?= $access['last_device_name'] ? htmlspecialchars($access['last_device_name']) : '<span class="text-muted">Unknown</span>' ?></td>
+                    <td><?= $access['access_group'] ? htmlspecialchars($access['access_group']) : '<span class="text-muted">-</span>' ?></td>
                     <td class="text-muted small"><?= htmlspecialchars($access['mac_address']) ?></td>
                 </tr>
                 <?php endforeach; ?>
@@ -225,6 +227,7 @@ $logs = $logsStmt->fetchAll();
                     <th>Kode RFID</th>
                     <th>Pemilik</th>
                     <th>Device</th>
+                    <th>Grup Akses</th>
                     <th>MAC Address</th>
                     <th>Tipe</th>
                     <th>Keterangan</th>
@@ -241,6 +244,7 @@ $logs = $logsStmt->fetchAll();
                     <td><code class="bg-light px-2 py-1 rounded"><?= htmlspecialchars($log['rfid_code']) ?></code></td>
                     <td><?= $log['owner_name'] ? htmlspecialchars($log['owner_name']) : '<span class="text-muted">-</span>' ?></td>
                     <td><?= $log['device_name'] ? htmlspecialchars($log['device_name']) : '<span class="text-muted">Unknown</span>' ?></td>
+                    <td><?= $log['access_group'] ? htmlspecialchars($log['access_group']) : '<span class="text-muted">-</span>' ?></td>
                     <td class="text-muted small"><?= htmlspecialchars($log['mac_address']) ?></td>
                     <td><span class="badge text-bg-secondary"><?= htmlspecialchars($log['status_type']) ?></span></td>
                     <td>

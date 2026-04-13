@@ -1,5 +1,5 @@
 <?php
-require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../../config/database.php';
 
 header('Content-Type: application/json');
 
@@ -23,10 +23,23 @@ if (json_last_error() !== JSON_ERROR_NONE) {
 $rfidCode = $input['rfid_code'] ?? null;
 $sentAt = $input['sent_at'] ?? null;
 $macAddress = $input['mac_address'] ?? null;
+$statusType = $input['status_type'] ?? 'enter';
+
+if (!in_array($statusType, ['enter', 'exit'])) {
+    $statusType = 'enter';
+}
 
 if (empty($rfidCode) || empty($sentAt) || empty($macAddress)) {
     respond(['success' => false, 'message' => 'Missing required fields: rfid_code, sent_at, mac_address'], 400);
 }
+
+$parsedSentAt = date_create($sentAt);
+if ($parsedSentAt === false) {
+    respond(['success' => false, 'message' => 'Invalid sent_at format'], 400);
+}
+
+$sentAtForDb = $parsedSentAt->format('Y-m-d H:i:s');
+$logDate = $parsedSentAt->format('Y-m-d');
 
 if (!preg_match('/^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/', $macAddress)) {
     respond(['success' => false, 'message' => 'Invalid MAC address format'], 400);
@@ -34,83 +47,217 @@ if (!preg_match('/^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/', $macAddress)) {
 
 try {
     $pdo = getDB();
-    
-    $stmt = $pdo->prepare("SELECT id, device_name, is_active FROM devices WHERE mac_address = ? AND api_key = ?");
-    $stmt->execute([$macAddress, $apiKey]);
-    $device = $stmt->fetch();
-    
-    if (!$device) {
-        $pdo->prepare("INSERT INTO access_logs (rfid_code, sent_at, mac_address, is_registered, access_status, raw_payload, received_at) VALUES (?, ?, ?, ?, 'unknown_device', ?, NOW())")
-            ->execute([
-                $rfidCode, 
-                $sentAt, 
-                $macAddress, 
-                false, 
-                json_encode($input)
-            ]);
-        respond(['success' => false, 'message' => 'Unknown device'], 401);
+    $pdo->beginTransaction();
+
+    $findExistingSession = function (string $rfidCodeValue, string $macAddressValue, string $logDateValue) use ($pdo) {
+        $stmt = $pdo->prepare("
+            SELECT id, check_in_at, check_out_at
+            FROM access_sessions
+            WHERE rfid_code = ? AND mac_address = ? AND log_date = ?
+            ORDER BY id DESC
+            LIMIT 1
+        ");
+        $stmt->execute([$rfidCodeValue, $macAddressValue, $logDateValue]);
+        return $stmt->fetch();
+    };
+
+    $isDebugApiKey = defined('DEBUG_DEVICE_API_KEY') && hash_equals(DEBUG_DEVICE_API_KEY, $apiKey);
+    $device = null;
+
+    if ($isDebugApiKey) {
+        $device = [
+            'id' => null,
+            'device_name' => 'DEBUG_DEVICE',
+            'is_active' => true
+        ];
+    } else {
+        $stmt = $pdo->prepare("SELECT id, device_name, is_active FROM devices WHERE mac_address = ? AND api_key = ?");
+        $stmt->execute([$macAddress, $apiKey]);
+        $device = $stmt->fetch();
     }
-    
-    if (!$device['is_active']) {
-        $pdo->prepare("INSERT INTO access_logs (device_id, rfid_code, sent_at, mac_address, is_registered, access_status, raw_payload, received_at) VALUES (?, ?, ?, ?, ?, 'rejected', ?, NOW())")
-            ->execute([
-                $device['id'],
-                $rfidCode, 
-                $sentAt, 
-                $macAddress, 
-                false,
-                json_encode($input)
-            ]);
-        respond(['success' => false, 'message' => 'Device inactive'], 403);
-    }
-    
-    $stmt = $pdo->prepare("SELECT id, owner_name, status FROM rfids WHERE rfid_code = ?");
-    $stmt->execute([$rfidCode]);
-    $rfid = $stmt->fetch();
-    
+
+    $deviceId = $device['id'] ?? null;
+    $deviceName = $device['device_name'] ?? null;
+    $deviceActive = $device['is_active'] ?? false;
+
     $isRegistered = false;
-    $accessStatus = 'rejected';
+    $accessStatus = 'unknown_device';
     $rfidId = null;
     $ownerName = null;
-    
-    if ($rfid) {
-        $isRegistered = true;
-        $rfidId = $rfid['id'];
-        $ownerName = $rfid['owner_name'];
-        
-        if ($rfid['status'] === 'active') {
-            $accessStatus = 'accepted';
-        } else {
-            $accessStatus = 'rejected';
+    $responseSuccess = false;
+    $responseMessage = 'Unknown device';
+    $responseCode = 401;
+    $checkInAt = null;
+    $checkOutAt = null;
+    $accessNote = 'Unknown device';
+
+    if (!$device) {
+        $deviceName = 'UNKNOWN_DEVICE';
+    } elseif (!$deviceActive) {
+        $accessStatus = 'rejected';
+        $responseMessage = 'Device inactive';
+        $responseCode = 403;
+        $accessNote = 'Device inactive';
+        $stmt = $pdo->prepare("SELECT id, owner_name, status FROM rfids WHERE rfid_code = ?");
+        $stmt->execute([$rfidCode]);
+        $rfid = $stmt->fetch();
+        if ($rfid) {
+            $isRegistered = true;
+            $rfidId = $rfid['id'];
+            $ownerName = $rfid['owner_name'];
+        }
+    } else {
+        $stmt = $pdo->prepare("SELECT id, owner_name, status FROM rfids WHERE rfid_code = ?");
+        $stmt->execute([$rfidCode]);
+        $rfid = $stmt->fetch();
+
+        $accessStatus = 'rejected';
+        $responseSuccess = true;
+        $responseMessage = 'Access log stored';
+        $responseCode = 200;
+        $accessNote = 'RFID not registered';
+
+        if ($rfid) {
+            $isRegistered = true;
+            $rfidId = $rfid['id'];
+            $ownerName = $rfid['owner_name'];
+
+            if ($rfid['status'] === 'active') {
+                $accessStatus = 'accepted';
+                $accessNote = 'Access granted';
+            } else {
+                $accessNote = 'RFID inactive';
+            }
         }
     }
-    
-    $pdo->prepare("INSERT INTO access_logs (device_id, rfid_id, rfid_code, sent_at, mac_address, is_registered, access_status, raw_payload, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())")
-        ->execute([
-            $device['id'],
-            $rfidId,
-            $rfidCode, 
-            $sentAt, 
-            $macAddress, 
-            $isRegistered,
-            $accessStatus,
-            json_encode($input)
-        ]);
-    
-    $pdo->prepare("UPDATE devices SET last_seen_at = NOW() WHERE id = ?")
-        ->execute([$device['id']]);
-    
+
+    $pdo->prepare("
+        INSERT INTO access_logs (
+            device_id,
+            rfid_id,
+            rfid_code,
+            log_date,
+            request_at,
+            mac_address,
+            is_registered,
+            access_status,
+            status_type,
+            raw_payload,
+            received_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+    ")->execute([
+        $deviceId,
+        $rfidId,
+        $rfidCode,
+        $logDate,
+        $sentAtForDb,
+        $macAddress,
+        $isRegistered ? 1 : 0,
+        $accessStatus,
+        $statusType,
+        json_encode($input)
+    ]);
+
+    if ($accessStatus === 'accepted') {
+        $existingSession = $findExistingSession($rfidCode, $macAddress, $logDate);
+
+        if ($existingSession) {
+            $checkInAt = $existingSession['check_in_at'];
+            $checkOutAt = $existingSession['check_out_at'];
+
+            if ($statusType === 'exit') {
+                if (empty($checkInAt)) {
+                    $checkInAt = $sentAtForDb;
+                }
+                $checkOutAt = $sentAtForDb;
+            } else {
+                if (empty($checkInAt)) {
+                    $checkInAt = $sentAtForDb;
+                }
+                $checkOutAt = null;
+            }
+
+            $pdo->prepare("
+                UPDATE access_sessions
+                SET device_id = ?,
+                    rfid_id = ?,
+                    check_in_at = ?,
+                    check_out_at = ?,
+                    last_tap_at = ?,
+                    owner_name = ?,
+                    updated_at = NOW()
+                WHERE id = ?
+            ")->execute([
+                $deviceId,
+                $rfidId,
+                $checkInAt,
+                $checkOutAt,
+                $sentAtForDb,
+                $ownerName,
+                $existingSession['id']
+            ]);
+        } else {
+            $checkInAt = $sentAtForDb;
+            $checkOutAt = $statusType === 'exit' ? $sentAtForDb : null;
+
+            $pdo->prepare("
+                INSERT INTO access_sessions (
+                    device_id,
+                    rfid_id,
+                    rfid_code,
+                    log_date,
+                    check_in_at,
+                    check_out_at,
+                    last_tap_at,
+                    mac_address,
+                    owner_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ")->execute([
+                $deviceId,
+                $rfidId,
+                $rfidCode,
+                $logDate,
+                $checkInAt,
+                $checkOutAt,
+                $sentAtForDb,
+                $macAddress,
+                $ownerName
+            ]);
+        }
+    }
+
+    if (!$isDebugApiKey && !empty($deviceId)) {
+        $pdo->prepare("UPDATE devices SET last_seen_at = NOW() WHERE id = ?")
+            ->execute([$deviceId]);
+    }
+
+    $pdo->commit();
+
     respond([
-        'success' => true,
-        'message' => 'Access log stored',
+        'success' => $responseSuccess,
+        'message' => $responseMessage,
         'data' => [
             'is_registered' => $isRegistered,
             'access_status' => $accessStatus,
-            'owner_name' => $ownerName
+            'status_type' => $statusType,
+            'log_date' => $logDate,
+            'check_in_at' => $checkInAt,
+            'check_out_at' => $checkOutAt,
+            'owner_name' => $ownerName,
+            'access_note' => $accessNote,
+            'auth_mode' => $isDebugApiKey ? 'debug_api_key' : 'device_api_key',
+            'device_name' => $deviceName
         ]
-    ]);
+    ], $responseCode);
     
 } catch (Exception $e) {
+    if (isset($pdo) && $pdo->inTransaction()) {
+        $pdo->rollBack();
+    }
     error_log("Error: " . $e->getMessage());
-    respond(['success' => false, 'message' => 'Internal server error'], 500);
+    respond([
+        'success' => false,
+        'message' => 'Internal server error',
+        'debug_error' => $e->getMessage()
+    ], 500);
 }

@@ -3,6 +3,7 @@ define('DB_HOST', 'localhost');
 define('DB_NAME', 'novagate_db');
 define('DB_USER', 'root');
 define('DB_PASS', '');
+define('DEBUG_DEVICE_API_KEY', 'NOVAGATE_DEBUG_DEVICE_2026');
 
 function getDB() {
     static $pdo = null;
